@@ -2,17 +2,126 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
+// Rate Limiter Imports
+const rateLimit = require('express-rate-limit');
+const slowDown = require('express-slow-down');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
-// Cache für API-Anfragen (1 Stunde gültig)
+// Rate Limiter: Begrenzt Anfragen auf 100 pro Stunde pro IP
+const apiLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 Stunde
+    max: 100, // Limit auf 100 Anfragen pro Fenster
+    standardHeaders: true, // "RateLimit-*" Header in Antworten senden
+    legacyHeaders: false, // "X-RateLimit-*" Header deaktivieren
+    message: {
+        error: 'Zu viele Anfragen. Bitte versuche es später erneut.'
+    },
+    skip: (req) => {
+        // Überspringe für lokale Entwicklung
+        return req.ip === '127.0.0.1' || req.ip === '::1';
+    }
+});
+
+// Speed Limiter: Verlangsamt Anfragen nach einem bestimmten Punkt
+const speedLimiter = slowDown({
+    windowMs: 15 * 60 * 1000, // 15 Minuten
+    delayAfter: 30, // Verlangsame nach 30 Anfragen
+    delayMs: (hits) => hits * 100, // 100ms * Anzahl der Anfragen über dem Limit
+    skip: (req) => {
+        // Gleiche Ausnahmen wie oben
+        return req.ip === '127.0.0.1' || req.ip === '::1';
+    }
+});
+
+// Nur auf API-Routen anwenden
+app.use('/api/', apiLimiter);
+app.use('/api/', speedLimiter);
+
+// Tägliches API-Anfragenlimit
+const DAILY_API_LIMIT = 1000; // Maximale Anzahl an Overpass-API-Anfragen pro Tag
+let dailyApiCounter = 0;
+let lastCounterReset = Date.now();
+
+// Counter für API-Anfragen zurücksetzen
+function resetApiCounter() {
+    const now = Date.now();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+
+    if (now - lastCounterReset >= oneDayMs) {
+        dailyApiCounter = 0;
+        lastCounterReset = now;
+        console.log('Daily API counter reset');
+    }
+}
+
+// Prüfen, ob wir API-Anfragen machen dürfen
+function canMakeApiRequest() {
+    resetApiCounter();
+    return dailyApiCounter < DAILY_API_LIMIT;
+}
+
+// API-Anfrage zählen
+function trackApiRequest() {
+    dailyApiCounter++;
+    console.log(`API request count: ${dailyApiCounter}/${DAILY_API_LIMIT}`);
+}
+
+// Cache für API-Anfragen (24 Stunden gültig)
 const locationCache = {};
-const CACHE_EXPIRATION = 3600000; // 1 Stunde in Millisekunden
+const CACHE_EXPIRATION = 24 * 60 * 60 * 1000; // 24 Stunden in Millisekunden
+const CACHE_CLEANUP_INTERVAL = 60 * 60 * 1000; // Stündlich aufräumen
+
+// Cache-Cleanup-Funktion, um Speicherlecks zu verhindern
+function setupCacheCleanup() {
+    setInterval(() => {
+        const now = Date.now();
+        const expiredKeys = [];
+
+        // Finde abgelaufene Cache-Einträge
+        for (const key in locationCache) {
+            if (locationCache[key].expiry <= now) {
+                expiredKeys.push(key);
+            }
+        }
+
+        // Entferne abgelaufene Einträge
+        expiredKeys.forEach(key => {
+            delete locationCache[key];
+        });
+
+        if (expiredKeys.length > 0) {
+            console.log(`Cache cleanup: Removed ${expiredKeys.length} expired entries`);
+        }
+    }, CACHE_CLEANUP_INTERVAL);
+}
+
+// Cache-Funktionen
+function getCachedData(key) {
+    const cacheEntry = locationCache[key];
+    if (cacheEntry && cacheEntry.expiry > Date.now()) {
+        return cacheEntry.data;
+    }
+    return null;
+}
+
+function setCachedData(key, data) {
+    locationCache[key] = {
+        data,
+        expiry: Date.now() + CACHE_EXPIRATION
+    };
+}
+
+// Starte das Cache-Cleanup beim Serverstart
+setupCacheCleanup();
+
+// Statische Dateien erst nach den Limitern laden
+app.use(express.static(path.join(__dirname, 'public')));
 
 // API zur Suche nach Orten über OpenStreetMap
 app.get('/api/locations', async (req, res) => {
@@ -27,10 +136,21 @@ app.get('/api/locations', async (req, res) => {
         const cacheKey = `${city.toLowerCase()}-${category}`;
 
         // Prüfe, ob Ergebnis im Cache vorhanden
-        if (locationCache[cacheKey]) {
+        const cachedData = getCachedData(cacheKey);
+        if (cachedData) {
             console.log(`Using cached data for ${cacheKey}`);
-            return res.json(locationCache[cacheKey]);
+            return res.json(cachedData);
         }
+
+        // Prüfe, ob wir das API-Limit erreicht haben
+        if (!canMakeApiRequest()) {
+            console.log(`API limit reached (${DAILY_API_LIMIT}). Using fallback data.`);
+            const fallbackData = generateFallbackLocations(city, category, 10); // Mehr Fallback-Daten
+            return res.json(fallbackData);
+        }
+
+        // Zähle die API-Anfrage
+        trackApiRequest();
 
         console.log(`Fetching data for ${city}, category: ${category}`);
 
@@ -81,21 +201,23 @@ app.get('/api/locations', async (req, res) => {
 
         if (!cityData) {
             console.log(`City not found after multiple attempts: ${city}`);
-            return res.json(generateFallbackLocations(city, category, 8)); // Mehr Fallback-Orte für unbekannte Städte
+            const fallbackLocations = generateFallbackLocations(city, category, 8);
+            setCachedData(cacheKey, fallbackLocations);
+            return res.json(fallbackLocations);
         }
 
-        // OSM-Tag basierend auf Kategorie ermitteln
+        // OSM-Tags basierend auf Kategorie ermitteln
         const osmTags = mapCategoryToOsmTags(category);
         if (!osmTags || osmTags.length === 0) {
-            return res.json(generateFallbackLocations(city, category, 5));
+            const fallbackLocations = generateFallbackLocations(city, category, 5);
+            setCachedData(cacheKey, fallbackLocations);
+            return res.json(fallbackLocations);
         }
 
         // Alle Orte von allen passenden Tags sammeln
         let allLocations = [];
 
         // Koordinaten- oder Bounding-Box-basierte Suche, je nach verfügbaren Daten
-        let overpassQuery = '';
-
         if (cityData.boundingbox) {
             // Bounding-Box-basierte Suche
             const [south, north, west, east] = cityData.boundingbox;
@@ -179,11 +301,8 @@ app.get('/api/locations', async (req, res) => {
             }
         }
 
-        // Speichere Ergebnis im Cache (1 Stunde gültig)
-        locationCache[cacheKey] = allLocations;
-        setTimeout(() => {
-            delete locationCache[cacheKey];
-        }, CACHE_EXPIRATION);
+        // Speichere Ergebnis im Cache (24 Stunden gültig)
+        setCachedData(cacheKey, allLocations);
 
         console.log(`Returning ${allLocations.length} locations for ${city}, category: ${category}`);
         res.json(allLocations);
@@ -250,66 +369,77 @@ async function processOverpassData(data, city) {
     // Maximal 15 Ergebnisse, um API-Anfragen zu reduzieren
     const elementsToProcess = data.elements.slice(0, 15);
 
-    for (const element of elementsToProcess) {
-        // Extrahiere Name und Position
-        const name = element.tags && element.tags.name ? element.tags.name : getDefaultName(element, city);
+    // Batch-Verarbeitung für Adresssuchen
+    const batchSize = 5;
+    for (let i = 0; i < elementsToProcess.length; i += batchSize) {
+        const batch = elementsToProcess.slice(i, i + batchSize);
 
-        // Überspringe Duplikate
-        if (processedNames.has(name)) continue;
-        processedNames.add(name);
+        for (const element of batch) {
+            // Extrahiere Name und Position
+            const name = element.tags && element.tags.name ? element.tags.name : getDefaultName(element, city);
 
-        let latitude, longitude;
+            // Überspringe Duplikate
+            if (processedNames.has(name)) continue;
+            processedNames.add(name);
 
-        if (element.center) {
-            latitude = element.center.lat;
-            longitude = element.center.lon;
-        } else {
-            latitude = element.lat;
-            longitude = element.lon;
-        }
+            let latitude, longitude;
 
-        // Baue eine vereinfachte Adresse
-        let address = "";
-
-        if (element.tags) {
-            // Versuche verschiedene Adressformate
-            if (element.tags.addr_street && element.tags.addr_housenumber) {
-                address = `${element.tags.addr_street} ${element.tags.addr_housenumber}, ${city}`;
-            } else if (element.tags['addr:street'] && element.tags['addr:housenumber']) {
-                address = `${element.tags['addr:street']} ${element.tags['addr:housenumber']}, ${city}`;
-            } else if (element.tags.street && element.tags.housenumber) {
-                address = `${element.tags.street} ${element.tags.housenumber}, ${city}`;
-            } else if (element.tags['addr:street']) {
-                address = `${element.tags['addr:street']}, ${city}`;
-            } else if (element.tags.street) {
-                address = `${element.tags.street}, ${city}`;
+            if (element.center) {
+                latitude = element.center.lat;
+                longitude = element.center.lon;
+            } else {
+                latitude = element.lat;
+                longitude = element.lon;
             }
+
+            // Baue eine vereinfachte Adresse
+            let address = "";
+
+            if (element.tags) {
+                // Versuche verschiedene Adressformate
+                if (element.tags.addr_street && element.tags.addr_housenumber) {
+                    address = `${element.tags.addr_street} ${element.tags.addr_housenumber}, ${city}`;
+                } else if (element.tags['addr:street'] && element.tags['addr:housenumber']) {
+                    address = `${element.tags['addr:street']} ${element.tags['addr:housenumber']}, ${city}`;
+                } else if (element.tags.street && element.tags.housenumber) {
+                    address = `${element.tags.street} ${element.tags.housenumber}, ${city}`;
+                } else if (element.tags['addr:street']) {
+                    address = `${element.tags['addr:street']}, ${city}`;
+                } else if (element.tags.street) {
+                    address = `${element.tags.street}, ${city}`;
+                }
+            }
+
+            // Fallback, wenn keine Adressdetails vorhanden sind
+            if (!address) {
+                address = `${city}`;
+            }
+
+            // Generiere eine realistische Bewertung
+            let rating = 3.0;
+            if (element.tags && element.tags.stars) {
+                // Versuche, Sterne aus den Tags zu extrahieren
+                rating = parseFloat(element.tags.stars);
+            } else {
+                // Generiere eine zufällige Bewertung, etwas gewichtet in Richtung positiv
+                rating = (3.5 + Math.random() * 1.5).toFixed(1);
+            }
+
+            // Füge Ort zur Liste hinzu
+            locations.push({
+                name: name,
+                address: address,
+                rating: rating,
+                url: `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}&zoom=19`,
+                latitude,
+                longitude
+            });
         }
 
-        // Fallback, wenn keine Adressdetails vorhanden sind
-        if (!address) {
-            address = `${city}`;
+        // Kurze Pause zwischen Batches, um Rate-Limits zu vermeiden
+        if (i + batchSize < elementsToProcess.length) {
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
-
-        // Generiere eine realistische Bewertung
-        let rating = 3.0;
-        if (element.tags && element.tags.stars) {
-            // Versuche, Sterne aus den Tags zu extrahieren
-            rating = parseFloat(element.tags.stars);
-        } else {
-            // Generiere eine zufällige Bewertung, etwas gewichtet in Richtung positiv
-            rating = (3.5 + Math.random() * 1.5).toFixed(1);
-        }
-
-        // Füge Ort zur Liste hinzu
-        locations.push({
-            name: name,
-            address: address,
-            rating: rating,
-            url: `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}&zoom=19`,
-            latitude,
-            longitude
-        });
     }
 
     return locations;
