@@ -1,0 +1,68 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# Umgebungsvariablen
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Abhängig vom Betriebssystem
+.DS_Store
+Thumbs.db
+.directory
+
+# Editor-Dateien
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# Debugging
+.chrome/
+.node-gyp
+
+# Temporäre Dateien
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Build-Verzeichnisse
+dist/
+build/
+out/
+
+# Lokale Daten
+data/
+cache/
+
+# API-Schlüssel oder Konfigurationsdateien, die sensible Daten enthalten könnten
+config.js
+config.json
+.apikeys
+
+# Betriebssystem-spezifische Dateien
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

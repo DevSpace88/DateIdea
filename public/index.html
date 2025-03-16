@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Das verrückte Date-Rad</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page-container">
+    <div class="content">
+        <h1>Das verrückte Date-Rad</h1>
+        <p>Gib deine Stadt ein und dreh das Rad für eine zufällige Date-Idee!</p>
+
+        <div class="city-container">
+            <form id="city-form">
+                <input type="text" id="city-input" class="city-input" placeholder="Deine Stadt eingeben (z.B. Berlin)" value="Berlin">
+                <div class="api-status" id="api-status"></div>
+            </form>
+        </div>
+
+        <div class="wheel-container">
+            <div class="pointer"></div>
+            <div class="wheel" id="wheel"></div>
+        </div>
+
+        <button id="spin-button">Rad drehen</button>
+
+        <div class="result-container" id="result-container">
+            <div class="date-emoji" id="date-emoji"></div>
+            <div class="date-idea" id="date-idea"></div>
+            <div id="location-container"></div>
+        </div>
+    </div>
+
+    <footer>
+        <!-- Zusätzlicher Freiraum unten -->
+    </footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
